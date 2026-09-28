@@ -2,6 +2,30 @@
 
 **Know what every fill-up costs you.**
 
+<p align="center">
+  <a href="https://github.com/sayedmdsafwan/Fuel-Metrics/releases/latest/download/app-debug.apk"><img src="https://img.shields.io/badge/%E2%AC%87%20Download%20APK-1F4E89?style=for-the-badge&logo=android&logoColor=white" alt="Download APK" height="48"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/sayedmdsafwan/Fuel-Metrics/releases/latest"><img src="https://img.shields.io/github/v/release/sayedmdsafwan/Fuel-Metrics?color=1F4E89" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?logo=android&logoColor=white" alt="Android 7.0+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/Offline-100%25-success" alt="Offline">
+</p>
+
+## Download
+
+**[Download the latest APK](https://github.com/sayedmdsafwan/Fuel-Metrics/releases/latest/download/app-debug.apk)** (one tap, about 2 MB). All versions are on the [Releases page](https://github.com/sayedmdsafwan/Fuel-Metrics/releases).
+
+**Install steps**
+1. Open the link above on your Android phone and download `app-debug.apk`.
+2. Open the downloaded file. If Android asks, allow **Install unknown apps** for your browser or file manager.
+3. Tap **Install**, then open **Fuel Metrics**.
+
+> This is a debug build published for easy testing, so Play Protect may show a warning. The app has no permissions and no internet access, and the full source is in this repository.
+
+---
+
 Fuel Metrics is a free, open-source fuel and mileage tracker for Android. Log your fill-ups, see your real-world efficiency and running cost, and explore your history with charts and stat cards. Everything runs **fully offline** and your data never leaves your device.
 
 Under the hood it is a lightweight Android shell (a single `WebView` activity) hosting a plain HTML/CSS/JavaScript app. There is no framework, no build step, no backend, no ads and no tracking.
@@ -12,6 +36,7 @@ Under the hood it is a lightweight Android shell (a single `WebView` activity) h
 
 ## Table of contents
 
+- [Download](#download)
 - [Highlights](#highlights)
 - [Features in detail](#features-in-detail)
 - [How efficiency is calculated](#how-efficiency-is-calculated)
@@ -241,7 +266,7 @@ Rough map of the file, in order: utilities, data model, efficiency engine (`comp
 ### Steps
 1. Clone the repository:
    ```bash
-   git clone https://github.com/<your-username>/<repo-name>.git
+   git clone https://github.com/sayedmdsafwan/Fuel-Metrics.git
    ```
 2. Open the project folder in Android Studio and wait for Gradle sync.
 3. If sync reports *Invalid Gradle JDK configuration*, open **Settings → Build, Execution, Deployment → Build Tools → Gradle** and set **Gradle JDK** to the embedded JDK (`jbr`).
