@@ -40,6 +40,12 @@ function computeDerived(entries) {
   const out = [];
   for (const e of sorted) {
     let distanceSinceLast = null, efficiency = null, costPerKm = null, qualifies = false;
+    // distanceSinceFull / volumeSinceFull are the exact numerator and denominator
+    // this entry's efficiency came from (full tank -> full tank). Aggregate
+    // averages must sum THESE, not distanceSinceLast+volume: when a partial fill
+    // sits in between, distanceSinceLast measures only the last hop and that
+    // partial fill's fuel is missing, which over-states efficiency.
+    let distanceSinceFull = null, volumeSinceFull = null;
     if (prev) {
       const gap = e.odometer - prev.odometer;
       if (gap > 0) { distanceSinceLast = gap; costPerKm = e.totalCost / gap; }
@@ -48,12 +54,16 @@ function computeDerived(entries) {
     volSinceFull += e.volume;
     if (distanceSinceLast != null && e.fullTank && !chainBroken && lastFullOdo != null) {
       const dsf = e.odometer - lastFullOdo;
-      if (dsf > 0 && volSinceFull > 0) { efficiency = dsf / volSinceFull; qualifies = true; }
+      if (dsf > 0 && volSinceFull > 0) {
+        efficiency = dsf / volSinceFull; qualifies = true;
+        distanceSinceFull = dsf; volumeSinceFull = volSinceFull;
+      }
     }
     if (e.fullTank) { lastFullOdo = e.odometer; volSinceFull = 0; chainBroken = false; }
     prev = e;
     out.push({ entry: e, id: e.id, date: e.date, odometer: e.odometer, volume: e.volume, totalCost: e.totalCost, unitPrice: e.unitPrice,
-      fullTank: e.fullTank, missedPrevious: e.missedPrevious, notes: e.notes, distanceSinceLast, efficiency, costPerKm, qualifies });
+      fullTank: e.fullTank, missedPrevious: e.missedPrevious, notes: e.notes, distanceSinceLast, efficiency, costPerKm, qualifies,
+      distanceSinceFull, volumeSinceFull });
   }
   return out;
 }
@@ -306,14 +316,14 @@ function bestWorst(filtered) {
 function yearOverYear(all) {
   const g = {}; for (const e of [...all].sort((a, b) => cmp(a.date, b.date))) (g[e.date.slice(0, 4)] ||= []).push(e);
   return Object.keys(g).sort().map(year => {
-    const rows = g[year], q = rows.filter(r => r.qualifies), qd = sum(q, r => r.distanceSinceLast || 0), qv = sum(q, r => r.volume);
+    const rows = g[year], q = rows.filter(r => r.qualifies), qd = sum(q, r => r.distanceSinceFull || 0), qv = sum(q, r => r.volumeSinceFull || 0);
     return { year, cost: sum(rows, r => r.totalCost), distance: sum(rows, r => r.distanceSinceLast || 0), avgEfficiency: qv > 0 ? qd / qv : null };
   });
 }
 function monthOverMonth(all) {
   const cur = todayISO().slice(0, 7), prev = minusMonths(1).slice(0, 7);
   const cost = k => { const r = all.filter(e => e.date.slice(0, 7) === k); return r.length ? sum(r, e => e.totalCost) : null; };
-  const eff = k => { const r = all.filter(e => e.date.slice(0, 7) === k && e.qualifies), d = sum(r, e => e.distanceSinceLast || 0), v = sum(r, e => e.volume); return v > 0 ? d / v : null; };
+  const eff = k => { const r = all.filter(e => e.date.slice(0, 7) === k && e.qualifies), d = sum(r, e => e.distanceSinceFull || 0), v = sum(r, e => e.volumeSinceFull || 0); return v > 0 ? d / v : null; };
   return { curCost: cost(cur), prevCost: cost(prev), curEff: eff(cur), prevEff: eff(prev) };
 }
 const dayMs = 86400000, toUTC = iso => { const [y, m, d] = iso.split('-').map(Number); return Date.UTC(y, m - 1, d); };
@@ -574,21 +584,15 @@ const ui = { tab: 'home', range: 'all', cs: null, ce: null };
 const TABS = [['home', 'Home', 'home'], ['log', 'Log', 'list'], ['stats', 'Stats', 'bars'], ['settings', 'Settings', 'settings']];
 let chartJobs = [];
 
-const spark = vals => {
-  if (vals.length < 2) return '';
-  const w = 300, h = 46, p = 4, mx = Math.max(...vals), mn = Math.min(...vals), rg = (mx - mn) || 1;
-  const line = vals.map((x, i) => `${(w * i / (vals.length - 1)).toFixed(1)},${(p + (h - 2 * p) * (1 - (x - mn) / rg)).toFixed(1)}`).join(' ');
-  return `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="width:100%;height:${h}px;margin-top:14px"><polygon points="0,${h} ${line} ${w},${h}" fill="rgba(255,255,255,.13)"/><polyline points="${line}" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/></svg>`;
-};
 const effPill = (e, v) => e.qualifies ? `<div class="col end"><span class="epill">${fmtNum(e.efficiency, 2)}</span><span class="lsm faint" style="margin-top:4px">${effL(v)}</span></div>` : '';
 function homeScreen(v, D) {
   const q = D.filter(e => e.qualifies), tv = sum(D, e => e.volume), tc = sum(D, e => e.totalCost), td = sum(D, e => e.distanceSinceLast || 0);
-  const qd = sum(q, e => e.distanceSinceLast || 0), qv = sum(q, e => e.volume), avgEff = qv > 0 ? qd / qv : null, avgCost = td > 0 ? tc / td : null, has = D.length > 0;
+  const qd = sum(q, e => e.distanceSinceFull || 0), qv = sum(q, e => e.volumeSinceFull || 0), avgEff = qv > 0 ? qd / qv : null, avgCost = td > 0 ? sum(D.filter(e => e.distanceSinceLast != null), e => e.totalCost) / td : null, has = D.length > 0;
   const ht = (label, val, unit) => `<div class="htile f1"><span>${label}</span><b>${esc(val)}${unit ? `<em>${esc(unit)}</em>` : ''}</b></div>`;
   const life = (label, val, unit, c) => `<div class="stat f1"><i style="background:${c}"></i><div class="lsm faint">${label}</div><div class="sv">${mono(val, 18, 700)}</div>${unit ? `<div class="lsm faint">${esc(unit)}</div>` : '<div style="height:14px"></div>'}</div>`;
   let h = `<div class="pad">${sectionHeader('Your fuel overview', 'A quick look at efficiency, spending and distance.')}<div style="height:16px"></div>
   <div class="hero"><div class="row between"><span class="hl">Average efficiency</span>${avgEff != null ? `<span class="hchip">${effL(v)}</span>` : ''}</div>
-  <div class="hval">${avgEff != null ? fmtNum(avgEff, 2) : '—'}</div>${avgEff != null ? spark(q.slice(-14).map(e => e.efficiency)) : '<div class="hl" style="margin-top:8px">Log two full-tank fill-ups to measure efficiency.</div>'}
+  <div class="hval">${avgEff != null ? fmtNum(avgEff, 2) : '—'}</div>${avgEff != null ? '' : '<div class="hl" style="margin-top:8px">Log two full-tank fill-ups to measure efficiency.</div>'}
   <div class="row g10 hrow">${ht(`Cost / ${v.odometerUnit}`, avgCost != null ? fmtNum(avgCost, 2) : '—', avgCost != null ? S.settings.currency : '')}${ht('Fuel used', has ? fmtNum(tv, 1) : '—', has ? volL(v) : '')}</div></div>
   <div class="tm" style="margin:22px 0 10px">Lifetime</div><div class="row g10" style="align-items:stretch">${life('Distance', has ? fmtNum(td, 0) : '—', v.odometerUnit, TEAL)}${life('Spent', has ? fmtNum(tc, 0) : '—', has ? S.settings.currency : '', CORAL)}${life('Fill-ups', has ? String(D.length) : '—', '', AMBER)}</div><div style="height:22px"></div>`;
   if (!has) h += `<div class="card"><div class="row g12">${badge('gas', TEAL)}<div><div class="ts">Ready for your first fill-up</div><div class="bs dim" style="margin-top:3px">Tap Add fill-up to record fuel, cost and odometer details.</div></div></div></div>`;
@@ -738,14 +742,13 @@ function render() {
   drawCharts();
 }
 
-document.addEventListener('click', e => {
+if (typeof document !== 'undefined') document.addEventListener('click', e => {
   if (e.target.closest('#modal-root')) return;
   const t = e.target;
   const tab = t.closest('[data-tab]'); if (tab) { ui.tab = tab.dataset.tab; render(); return; }
   const rg = t.closest('[data-range]'); if (rg) { ui.range = rg.dataset.range; render(); if (ui.range === 'custom') customRangeDialog(); return; }
   const ce = t.closest('[data-card-edit]'); if (ce) { const v = active(); cardBuilder(v.customCards.find(c => c.id === ce.dataset.cardEdit)); return; }
   const cd = t.closest('[data-card-del]'); if (cd) { A.deleteCard(cd.dataset.cardDel); return; }
-  if (t.closest('[data-badge]')) return;
   const en = t.closest('[data-entry]'); if (en) { entrySheet(active().entries.find(x => x.id === en.dataset.entry)); return; }
   const a = t.closest('[data-act]'); if (!a) return;
   switch (a.dataset.act) {
@@ -758,7 +761,7 @@ document.addEventListener('click', e => {
     case 'demo': A.demo(); break;
     case 'range-dialog': customRangeDialog(); break;
     case 'add-card': addCardSheet(); break;
-    case 'save-settings': A.updateVehicle($('#s-name').value, $('#s-odo').value, $('#s-vol').value); A.updateSettings($('#s-cur').value, $('#s-fmt').value); break;
+    case 'save-settings': { const nm = $('#s-name').value, od = $('#s-odo').value, vl = $('#s-vol').value, cu = $('#s-cur').value, fm = $('#s-fmt').value; A.updateVehicle(nm, od, vl); A.updateSettings(cu, fm); break; }
     case 'del-vehicle': { const v = active(); confirmDialog(`Delete ${v.name}?`, 'This deletes the vehicle and every fuel entry stored under it. This cannot be undone.', 'Delete', () => A.deleteVehicle(v.id)); break; }
     case 'clear': confirmDialog('Clear all data?', 'Every vehicle and every logged entry will be removed from this device. This cannot be undone.', 'Clear everything', () => A.clearAll()); break;
   }

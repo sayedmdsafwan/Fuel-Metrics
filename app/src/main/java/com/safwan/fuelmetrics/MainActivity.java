@@ -89,9 +89,9 @@ public class MainActivity extends ComponentActivity {
         super.onCreate(savedInstanceState);
 
         FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(0xFFF6F7F4);
+        root.setBackgroundColor(0xFFF2F4F8);
         web = new WebView(this);
-        web.setBackgroundColor(0xFFF6F7F4);
+        web.setBackgroundColor(0xFFF2F4F8);
         web.setOverScrollMode(WebView.OVER_SCROLL_NEVER);
         root.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -147,8 +147,8 @@ public class MainActivity extends ComponentActivity {
             }
         });
 
-        if (savedInstanceState != null) web.restoreState(savedInstanceState);
-        else web.loadUrl(START_URL);
+        // No saved state, or it can't be restored: load the app normally (avoids a blank screen).
+        if (savedInstanceState == null || web.restoreState(savedInstanceState) == null) web.loadUrl(START_URL);
     }
 
     @Override
