@@ -1,3 +1,6 @@
 # Add project specific ProGuard rules here.
-# No custom rules needed currently — this is a plain Jetpack Compose app
-# with no project-specific reflection rules required at this time.
+# No custom rules needed currently. The app is a single WebView activity with
+# no reflection and one @JavascriptInterface bridge (AndroidBridge.saveCsv);
+# R8 keeps that bridge automatically because it is referenced from
+# MainActivity, so nothing has to be pinned by hand.
+
