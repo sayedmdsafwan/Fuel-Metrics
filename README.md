@@ -87,7 +87,7 @@ reminder appears on launch.
 
 ### Android integration
 Native **Save as** dialog for CSV export, the system file picker for import, a Back
-button that closes any open sheet before leaving the app, and a WebView that survives
+button that closes any open sheet, then returns to Home, before leaving the app, and a WebView that survives
 rotation and other configuration changes.
 
 ## ⛽ How efficiency is calculated
@@ -284,6 +284,7 @@ The whole state is one JSON object saved under `fuel_log_state`:
     "name": "My car",
     "odometerUnit": "km",          // "km" | "mi"
     "volumeUnit": "l",             // "l" | "gal"
+    "lastBackup": "2026-09-28",    // optional, per vehicle (last CSV export)
     "entries": [{
       "id": "uuid",
       "date": "2026-08-04",        // ISO date

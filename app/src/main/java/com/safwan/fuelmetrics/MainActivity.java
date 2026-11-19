@@ -6,8 +6,10 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Bundle;
+import android.provider.DocumentsContract;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
+import android.webkit.RenderProcessGoneDetail;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -26,6 +28,11 @@ import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 
@@ -34,8 +41,11 @@ public class MainActivity extends ComponentActivity {
 
     private static final String START_URL = "file:///android_asset/index.html";
 
+    // CSV waiting for the system "save as" dialog. Kept in a cache file (not a field) so it survives
+    // the process being killed while that dialog is open.
+    private static final String PENDING_CSV = "pending_export.csv";
+
     private WebView web;
-    private String pendingCsv;
     private ValueCallback<Uri[]> fileCallback;
 
     // CSV import: system file picker requested by <input type="file">.
@@ -51,26 +61,60 @@ public class MainActivity extends ComponentActivity {
     // CSV export: system "save as" dialog.
     private final ActivityResultLauncher<String> saver = registerForActivityResult(
             new ActivityResultContracts.CreateDocument("text/csv"), uri -> {
-                String csv = pendingCsv;
-                pendingCsv = null;
-                if (uri == null || csv == null) return; // user cancelled
+                byte[] data = readPendingCsv();
+                pendingCsvFile().delete();
+                if (uri == null) return; // user cancelled
                 boolean ok = false;
-                try (OutputStream os = getContentResolver().openOutputStream(uri)) {
-                    if (os != null) {
-                        os.write(csv.getBytes(StandardCharsets.UTF_8));
-                        ok = true;
-                    }
-                } catch (Exception ignored) { }
+                if (data != null) {
+                    try (OutputStream os = getContentResolver().openOutputStream(uri)) {
+                        if (os != null) {
+                            os.write(data);
+                            ok = true;
+                        }
+                    } catch (Exception ignored) { }
+                }
+                if (!ok) {
+                    // The picker has already created an empty file; don't leave it behind.
+                    try { DocumentsContract.deleteDocument(getContentResolver(), uri); } catch (Exception ignored) { }
+                }
                 js(ok ? "A.exported()" : "toast(\"Couldn't save the CSV file\")");
             });
+
+    private File pendingCsvFile() {
+        return new File(getCacheDir(), PENDING_CSV);
+    }
+
+    private byte[] readPendingCsv() {
+        File f = pendingCsvFile();
+        if (!f.isFile()) return null;
+        try (FileInputStream in = new FileInputStream(f); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return out.toByteArray();
+        } catch (IOException e) {
+            return null;
+        }
+    }
 
     /** Exposed to JS as window.AndroidBridge. */
     private class Bridge {
         @JavascriptInterface
         public void saveCsv(String name, String csv) {
+            if (name == null || csv == null) return;
             runOnUiThread(() -> {
-                pendingCsv = csv;
-                saver.launch(name);
+                try (FileOutputStream out = new FileOutputStream(pendingCsvFile())) {
+                    out.write(csv.getBytes(StandardCharsets.UTF_8));
+                } catch (IOException e) {
+                    js("toast(\"Couldn't save the CSV file\")");
+                    return;
+                }
+                try {
+                    saver.launch(name);
+                } catch (ActivityNotFoundException e) { // no document picker on this device
+                    pendingCsvFile().delete();
+                    js("toast(\"No file manager available to save the CSV\")");
+                }
             });
         }
     }
@@ -119,6 +163,15 @@ public class MainActivity extends ComponentActivity {
                 // Never navigate away from the bundled app.
                 return !request.getUrl().toString().startsWith("file:///android_asset/");
             }
+
+            // The renderer was killed (normally low memory). Without this override the whole app dies.
+            // All data is in localStorage, so rebuilding the activity with a fresh WebView loses nothing.
+            @Override
+            public boolean onRenderProcessGone(WebView view, RenderProcessGoneDetail detail) {
+                if (detail.didCrash()) return false; // a real renderer crash: don't mask it
+                recreate();
+                return true;
+            }
         });
 
         web.setWebChromeClient(new WebChromeClient() {
@@ -136,14 +189,17 @@ public class MainActivity extends ComponentActivity {
             }
         });
 
-        // Back: close the open sheet/dialog first, otherwise leave the app.
+        // Back: the web app closes the open sheet/dialog, else returns to Home; otherwise we leave the app.
         getOnBackPressedDispatcher().addCallback(this, new OnBackPressedCallback(true) {
             @Override
             public void handleOnBackPressed() {
+                if (web == null) {
+                    finish();
+                    return;
+                }
                 web.evaluateJavascript(
-                        "(function(){var r=document.getElementById('modal-root');var o=r&&r.lastElementChild;"
-                                + "if(!o)return 0;o.dispatchEvent(new MouseEvent('click',{bubbles:true}));return 1})()",
-                        value -> { if (!"1".equals(value)) finish(); });
+                        "(function(){try{return window.handleBack?window.handleBack():false}catch(e){return false}})()",
+                        value -> { if (!"true".equals(value)) finish(); });
             }
         });
 

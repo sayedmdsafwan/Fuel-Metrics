@@ -17,9 +17,11 @@ const validYMD = (y, m, d) => { const t = new Date(Date.UTC(y, m - 1, d)); retur
 const todayISO = () => { const d = new Date(); return isoFrom(d.getFullYear(), d.getMonth() + 1, d.getDate()); };
 const minusMonths = n => { const t = new Date(); let y = t.getFullYear(), m = t.getMonth() + 1 - n; const d = t.getDate(); while (m < 1) { m += 12; y--; } return isoFrom(y, m, Math.min(d, new Date(Date.UTC(y, m, 0)).getUTCDate())); };
 const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-const roundTo = (v, d) => { const f = Math.pow(10, d); return Math.round(v * f) / f; };
-const fmtInput = n => Number.isInteger(n) ? String(n) : String(n);
-const fmtInt = n => Number.isInteger(n) ? String(n) : String(n);
+// Decimal-safe rounding (1.005 -> 1.01); falls back to plain scaling for exponent-form numbers.
+const roundTo = (v, d) => { if (!isFinite(v)) return v; const r = Number(Math.round(Number(`${v}e${d}`)) + `e-${d}`); return isFinite(r) ? r : Math.round(v * Math.pow(10, d)) / Math.pow(10, d); };
+// Value for an <input>: strips float noise such as 535.9900000000001 -> 535.99.
+const fmtInput = (n, d = 6) => (n == null || !isFinite(n)) ? '' : String(roundTo(n, d));
+const fmtInt = n => fmtNum(n, Number.isInteger(n) ? 0 : 2);
 
 /* ---------- model ---------- */
 const mkCard = o => ({ id: uuid(), kind: 'chart', title: '', metric: 'efficiency', groupBy: 'none', xAxis: 'date', chartType: 'line', ...o });
@@ -79,8 +81,11 @@ function demoState() {
     ['2026-03-24', 33040, 3.6, 505], ['2026-04-05', 33255, 3.9, 546], ['2026-04-19', 33470, 4.1, 574], ['2026-05-02', 33660, 3.5, 493],
     ['2026-05-18', 33890, 3.85, 540], ['2026-06-02', 34100, 3.75, 528], ['2026-06-20', 34330, 4.2, 588], ['2026-07-05', 34540, 3.65, 514],
     ['2026-07-22', 34770, 3.9, 549], ['2026-08-04', 34985, 3.8, 536]];
+  // Dates are shifted so the newest sample fill-up is today; month-over-month cards then always have data.
+  const lastT = toUTC(rows[rows.length - 1][0]), now = new Date();
+  const shift = iso => { const t = new Date(now.getFullYear(), now.getMonth(), now.getDate() - Math.round((lastT - toUTC(iso)) / dayMs)); return isoFrom(t.getFullYear(), t.getMonth() + 1, t.getDate()); };
   const entries = rows.map(([date, odometer, volume, totalCost], i) => mkEntry({
-    date, odometer, volume, totalCost, unitPrice: Math.round((totalCost / volume) * 100) / 100,
+    date: shift(date), odometer, volume, totalCost, unitPrice: Math.round((totalCost / volume) * 100) / 100,
     fullTank: i !== 6, notes: i === 6 ? 'Topped up halfway, not a full tank' : ''
   }));
   const v = mkVehicle({ name: 'TVS Ntorq 125', odometerUnit: 'km', volumeUnit: 'l', startingOdometer: 32200, entries });
@@ -233,7 +238,7 @@ function parseFuelio(rows, tDist, tVol) {
     if (m === '## log') { hIdx = i + 1; start = i + 2; break; }
   }
   const nonBlank = r => r.some(c => c.trim() !== '');
-  if (hIdx < 0 || hIdx >= rows.length) return { entries: [], skippedType: 0, errors: rows.slice(1).filter(nonBlank).length, datesGuessed: false };
+  if (hIdx < 0 || hIdx >= rows.length) return { entries: [], skippedType: 0, errors: 0, datesGuessed: false };
   const h = rows[hIdx].map(normHeader);
   const iDate = h.indexOf('data'), iOdo = h.findIndex(x => x.startsWith('odo(')), iFuel = h.findIndex(x => x.startsWith('fuel(')),
     iFull = h.indexOf('full'), iPrice = h.findIndex(x => x.startsWith('price')), iNotes = h.findIndex(x => x.startsWith('notes')), iMiss = h.indexOf('missed');
@@ -294,17 +299,20 @@ function metricValue(e, m) {
 function buildChartData(card, filtered) {
   const wm = filtered.map(e => [e, metricValue(e, card.metric)]).filter(x => x[1] != null);
   if (!wm.length) return { labels: [], values: [] };
+  const odo = card.xAxis === 'odometer';
   if (card.groupBy === 'cumulative') {
     let run = 0; const labels = [], values = [];
-    for (const [e, v] of [...wm].sort((a, b) => cmp(a[0].date, b[0].date))) { run += v; labels.push(fmtDate(e.date)); values.push(roundTo(run, 2)); }
+    for (const [e, v] of [...wm].sort((a, b) => odo ? a[0].odometer - b[0].odometer : cmp(a[0].date, b[0].date))) { run += v; labels.push(odo ? fmtNum(e.odometer, 0) : fmtDate(e.date)); values.push(roundTo(run, 2)); }
     return { labels, values };
   }
   if (card.groupBy === 'monthly-sum' || card.groupBy === 'monthly-avg') {
-    const g = {}; for (const [e, v] of [...wm].sort((a, b) => cmp(a[0].date, b[0].date))) (g[e.date.slice(0, 7)] ||= []).push(v);
-    const keys = Object.keys(g).sort();
-    return { labels: keys, values: keys.map(k => { const s = sum(g[k], x => x); return roundTo(card.groupBy === 'monthly-avg' ? s / g[k].length : s, 2); }) };
+    const g = {}; for (const it of [...wm].sort((a, b) => cmp(a[0].date, b[0].date))) (g[it[0].date.slice(0, 7)] ||= []).push(it);
+    const keys = Object.keys(g).sort(), avg = card.groupBy === 'monthly-avg';
+    return { labels: keys, values: keys.map(k => {
+      const items = g[k], s = sum(items, x => x[1]);
+      return roundTo(avg ? s / items.length : s, 2);
+    }) };
   }
-  const odo = card.xAxis === 'odometer';
   const sorted = [...wm].sort((a, b) => odo ? a[0].odometer - b[0].odometer : cmp(a[0].date, b[0].date));
   return { labels: sorted.map(([e]) => odo ? fmtNum(e.odometer, 0) : fmtDate(e.date)), values: sorted.map(([, v]) => roundTo(v, 2)) };
 }
@@ -334,8 +342,11 @@ function weeklyHeat(filtered) {
     const ws = t - new Date(t).getUTCDay() * dayMs; by.set(ws, (by.get(ws) || 0) + e.totalCost);
   }
   if (!by.size) return [];
-  const weeks = [...by.keys()].sort((a, b) => a - b).slice(-52), max = Math.max(...weeks.map(w => by.get(w)));
-  return weeks.map(w => { const c = by.get(w); const level = max <= 0 ? 0 : c <= 0 ? 0 : c < max * .33 ? 1 : c < max * .66 ? 2 : 3; return { level, cost: c }; });
+  // The last 52 calendar weeks ending this week; weeks without a fill-up are real (empty) cells.
+  const now = toUTC(todayISO()), end = now - new Date(now).getUTCDay() * dayMs;
+  const costs = Array.from({ length: 52 }, (_, i) => by.get(end - (51 - i) * 7 * dayMs) || 0), max = Math.max(...costs);
+  if (max <= 0) return [];
+  return costs.map(c => ({ level: c <= 0 ? 0 : c < max * .33 ? 1 : c < max * .66 ? 2 : 3, cost: c }));
 }
 function averageDays(filtered) {
   const t = filtered.map(e => toUTC(e.date)).filter(x => !isNaN(x)).sort((a, b) => a - b);
@@ -371,7 +382,7 @@ const P = {
 const ic = (n, size = 24, color) => `<svg viewBox="0 0 24 24" width="${size}" height="${size}" fill="currentColor"${color ? ` style="color:${color}"` : ''}><path d="${P[n]}"/></svg>`;
 const badge = (n, c, size = 42) => `<div class="badge" style="width:${size}px;height:${size}px;background:${c}1A">${ic(n, Math.round(size / 2), c)}</div>`;
 const mono = (t, size, weight = 400, color) => `<span class="mono" style="font-size:${size}px;font-weight:${weight}${color ? `;color:${color}` : ''}">${esc(t)}</span>`;
-const sel = (id, label, opts, val) => `<label class="field"><span>${label}</span><select id="${id}">${opts.map(([v, l]) => `<option value="${v}"${v === val ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
+const sel = (id, label, opts, val) => `<label class="field"><span>${label}</span><select id="${id}">${opts.map(([v, l]) => `<option value="${esc(v)}"${v === val ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
 const inp = (id, label, val, extra = '') => `<label class="field"><span>${label}</span><input id="${id}" value="${esc(val)}" ${extra}></label>`;
 const dinp = (id, label, val) => `<label class="field"><span>${label}</span><input id="${id}" type="date" value="${esc(val || '')}"></label>`;
 const sectionHeader = (t, s) => `<div class="tl">${t}</div>${s ? `<div class="bs dim" style="margin-top:3px">${s}</div>` : ''}`;
@@ -379,15 +390,31 @@ const emptyBox = (icon, title, msg) => `<div class="empty">${ic(icon, 32, FAINT)
 const secTitle = (icon, t, c) => `<div class="row" style="margin:20px 0 8px;gap:8px">${ic(icon, 18, c)}<span class="tm">${t}</span></div>`;
 
 /* ---------- persistence & state ---------- */
+const okNum = x => typeof x === 'number' && isFinite(x);
+const backupRaw = raw => { try { localStorage.setItem(KEY + '_corrupt', raw); } catch (e) { /* storage full: nothing more to do */ } };
+// Entries that would break calculations or CSV export (null odometer, bad date...) are dropped on load.
+function cleanEntry(e) {
+  if (!e || typeof e !== 'object' || !/^\d{4}-\d{2}-\d{2}$/.test(e.date) || !validYMD(+e.date.slice(0, 4), +e.date.slice(5, 7), +e.date.slice(8, 10))) return null;
+  if (!okNum(e.odometer) || e.odometer < 0 || !okNum(e.volume) || e.volume <= 0 || !okNum(e.totalCost) || e.totalCost < 0) return null;
+  return mkEntry({ ...e, id: (typeof e.id === 'string' && e.id) ? e.id : uuid(), unitPrice: (okNum(e.unitPrice) && e.unitPrice >= 0) ? e.unitPrice : roundTo(e.totalCost / e.volume, 2),
+    fullTank: e.fullTank !== false, missedPrevious: e.missedPrevious === true, notes: typeof e.notes === 'string' ? e.notes : '' });
+}
 function load() {
+  let raw = null;
   try {
-    const raw = localStorage.getItem(KEY); if (!raw) return;
-    const j = JSON.parse(raw), d = emptyState();
-    S = {
-      vehicles: (j.vehicles || []).map(v => mkVehicle({ ...v, entries: (v.entries || []).map(e => mkEntry(e)), customCards: v.customCards ? v.customCards.map(c => mkCard(c)) : defaultCards() })),
-      activeVehicleId: j.activeVehicleId ?? null, settings: { ...d.settings, ...(j.settings || {}) }, lastBackup: j.lastBackup ?? null
-    };
-  } catch (e) { S = emptyState(); }
+    raw = localStorage.getItem(KEY); if (!raw) return;
+    const j = JSON.parse(raw), d = emptyState(); let dropped = 0;
+    const vehicles = (Array.isArray(j.vehicles) ? j.vehicles : []).filter(v => v && typeof v === 'object').map(v => {
+      const rawEntries = Array.isArray(v.entries) ? v.entries : [], entries = rawEntries.map(cleanEntry).filter(Boolean);
+      dropped += rawEntries.length - entries.length;
+      return mkVehicle({ ...v, id: (typeof v.id === 'string' && v.id) ? v.id : uuid(), name: (typeof v.name === 'string' && v.name.trim()) ? v.name : 'My vehicle',
+        odometerUnit: v.odometerUnit === 'mi' ? 'mi' : 'km', volumeUnit: v.volumeUnit === 'gal' ? 'gal' : 'l',
+        startingOdometer: (okNum(v.startingOdometer) && v.startingOdometer >= 0) ? v.startingOdometer : 0, lastBackup: typeof v.lastBackup === 'string' ? v.lastBackup : null,
+        entries, customCards: Array.isArray(v.customCards) ? v.customCards.filter(c => c && typeof c === 'object').map(c => mkCard(c)) : defaultCards() });
+    });
+    S = { vehicles, activeVehicleId: j.activeVehicleId ?? null, settings: { ...d.settings, ...(j.settings || {}) }, lastBackup: j.lastBackup ?? null };
+    if (dropped) backupRaw(raw); // keep the original text so nothing is lost for good
+  } catch (e) { S = emptyState(); if (raw) backupRaw(raw); }
 }
 function persist() { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { toast("Couldn't save data — storage may be full"); } }
 let toastTimer;
@@ -402,12 +429,7 @@ const A = {
   validateOdometer(excludeId, odo) {
     const v = active(); if (!v) return null;
     if (!isFinite(odo) || odo < 0) return 'Odometer must be a non-negative number.';
-    const others = v.entries.filter(e => e.id !== excludeId);
-    if (others.some(e => e.odometer === odo)) return 'This odometer reading is already used by another entry.';
-    const lower = others.filter(e => e.odometer < odo);
-    if (lower.length) { const m = Math.max(...lower.map(e => e.odometer)); if (odo <= m) return `Odometer must be greater than the previous entry's reading (${fmtInt(m)} ${v.odometerUnit}).`; }
-    const higher = others.filter(e => e.odometer > odo);
-    if (higher.length) { const m = Math.min(...higher.map(e => e.odometer)); if (odo >= m) return `Odometer must be less than the next entry's reading (${fmtInt(m)} ${v.odometerUnit}).`; }
+    if (v.entries.some(e => e.id !== excludeId && e.odometer === odo)) return 'This odometer reading is already used by another entry.';
     return null;
   },
   validateDate(excludeId, odo, date) {
@@ -416,14 +438,25 @@ const A = {
     if (date > todayISO()) return "Date can't be in the future.";
     const others = v.entries.filter(e => e.id !== excludeId);
     const prev = others.filter(e => e.odometer < odo).sort((a, b) => b.odometer - a.odometer)[0];
-    if (prev && date < prev.date) return `Date can't be before the previous entry (${prev.date}, ${fmtInt(prev.odometer)} ${v.odometerUnit}).`;
+    if (prev && date < prev.date) return `Date can't be before the previous entry (${fmtDate(prev.date)}, ${fmtInt(prev.odometer)} ${v.odometerUnit}). Check the date and odometer.`;
     const next = others.filter(e => e.odometer > odo).sort((a, b) => a.odometer - b.odometer)[0];
-    if (next && date > next.date) return `Date can't be after the next entry (${next.date}, ${fmtInt(next.odometer)} ${v.odometerUnit}).`;
+    if (next && date > next.date) return `Date can't be after the next entry (${fmtDate(next.date)}, ${fmtInt(next.odometer)} ${v.odometerUnit}). Check the date and odometer.`;
     return null;
   },
-  updateVehicle(name, odometerUnit, volumeUnit) { const v = active(); if (!v) return; patchVehicle(v.id, x => ({ ...x, name: name.trim() ? name : x.name, odometerUnit, volumeUnit })); },
+  // convert = true rewrites odometer/volume/unit price into the new units; false only changes the labels.
+  updateVehicle(name, odometerUnit, volumeUnit, convert) {
+    const v = active(); if (!v) return;
+    patchVehicle(v.id, x => {
+      const nx = { ...x, name: name.trim() ? name : x.name, odometerUnit, volumeUnit };
+      if (convert) {
+        nx.entries = x.entries.map(e => { const vol = roundTo(convVol(e.volume, x.volumeUnit, volumeUnit), 6); return { ...e, odometer: roundTo(convDist(e.odometer, x.odometerUnit, odometerUnit), 6), volume: vol, unitPrice: vol > 0 ? roundTo(e.totalCost / vol, 2) : e.unitPrice }; });
+        nx.startingOdometer = roundTo(convDist(x.startingOdometer || 0, x.odometerUnit, odometerUnit), 6);
+      }
+      return nx;
+    });
+  },
   updateSettings(currency, dateFormat) { update(s => ({ ...s, settings: { currency: (currency.trim() ? currency : 'BDT').toUpperCase(), dateFormat } })); toast('Settings saved'); },
-  exported() { update(s => ({ ...s, lastBackup: todayISO() })); toast('CSV exported'); },
+  exported() { const v = active(); if (v) patchVehicle(v.id, x => ({ ...x, lastBackup: todayISO() })); toast('CSV exported'); }, // per vehicle: each export covers one vehicle
   importCsv(text) {
     const v = active(); if (!v) return;
     const r = buildEntriesFromCsv(text, v.odometerUnit, v.volumeUnit), m = mergeImported(v.entries, r.entries);
@@ -457,9 +490,13 @@ const A = {
 function openOverlay(html, cls = '') {
   const o = document.createElement('div'); o.className = 'overlay ' + cls; o.innerHTML = html; $('#modal-root').appendChild(o); document.body.classList.add('lock');
   const close = () => { o.remove(); if (!$('#modal-root').children.length) document.body.classList.remove('lock'); };
+  o._close = close;
   o.addEventListener('click', e => { if (e.target === o) close(); });
   return { el: o, close, $: s => $(s, o) };
 }
+function closeTopOverlay() { const r = $('#modal-root'), o = r && r.lastElementChild; if (!o) return false; (o._close || (() => o.remove()))(); return true; }
+// Called by the Android shell on Back: close the top sheet/dialog, else go back to Home, else let the app exit.
+function handleBack() { if (closeTopOverlay()) return true; if (active() && ui.tab !== 'home') { ui.tab = 'home'; render(); return true; } return false; }
 const openSheet = html => openOverlay(`<div class="sheet"><div class="grab"></div>${html}</div>`);
 const openDialog = html => openOverlay(`<div class="dialog">${html}</div>`, 'mid');
 function confirmDialog(title, text, label, onOk) {
@@ -483,7 +520,7 @@ function entrySheet(editing) {
   <div class="row g10" style="margin-top:10px">${editing ? '<button class="btn out danger f1" id="del">Delete</button>' : ''}<button class="btn f1" id="save">Save entry</button></div>`);
   let manual = false;
   const auto = () => { if (manual) return; const vo = num(d.$('#vol').value), c = num(d.$('#cost').value); if (vo != null && vo > 0 && c != null && c >= 0) d.$('#up').value = fmtInput(Math.round((c / vo) * 100) / 100); };
-  d.$('#vol').oninput = auto; d.$('#cost').oninput = auto; d.$('#up').oninput = () => { manual = true; };
+  d.$('#vol').oninput = auto; d.$('#cost').oninput = auto; d.$('#up').oninput = e => { manual = e.target.value.trim() !== ''; };
   const setErr = m => { d.$('#err').textContent = m; };
   if (editing) d.$('#del').onclick = () => confirmDialog('Delete this entry?', 'This cannot be undone.', 'Delete', () => { A.deleteEntry(editing.id); d.close(); });
   d.$('#save').onclick = () => {
@@ -500,9 +537,9 @@ function entrySheet(editing) {
 
 function vehicleSwitcher() {
   const d = openSheet(`<div class="row g12">${badge('car', TEAL)}<div><div class="tl">Your vehicles</div><div class="bs dim">Switch, edit or add a vehicle.</div></div></div><div style="height:16px"></div>
-  ${S.vehicles.map(v => `<div class="card p14 click" data-id="${v.id}" style="margin-bottom:8px"><div class="row g12">${badge('car', v.id === S.activeVehicleId ? TEAL : FAINT)}
+  ${S.vehicles.map(v => `<div class="card p14 click" data-id="${esc(v.id)}" style="margin-bottom:8px"><div class="row g12">${badge('car', v.id === S.activeVehicleId ? TEAL : FAINT)}
   <div class="f1"><div class="ts">${esc(v.name)}</div><div class="bs dim" style="margin-top:3px">${v.odometerUnit} · ${v.volumeUnit} · ${v.entries.length} fill-ups</div></div>
-  ${v.id === S.activeVehicleId ? ic('check', 21, TEAL) : ''}<button class="tbtn" data-edit="${v.id}">${ic('edit', 16)}Edit</button></div></div>`).join('')}
+  ${v.id === S.activeVehicleId ? ic('check', 21, TEAL) : ''}<button class="tbtn" data-edit="${esc(v.id)}">${ic('edit', 16)}Edit</button></div></div>`).join('')}
   <button class="btn tall full" id="add" style="margin-top:8px">${ic('add')}Add vehicle</button>`);
   d.el.onclick = e => {
     if (e.target === d.el) return d.close();
@@ -523,11 +560,17 @@ function vehicleForm(existing) {
     const so = existing ? null : num(d.$('#start').value);
     if (!existing && (so == null || !isFinite(so) || so < 0)) { d.$('#err').textContent = 'Starting odometer must be a non-negative number.'; return; }
     const name = d.$('#name').value, o = d.$('#odo').value, vl = d.$('#vol').value;
-    if (existing) { A.switchVehicle(existing.id); A.updateVehicle(name, o, vl); } else A.addVehicle(name, o, vl, so);
-    d.close();
+    if (existing) { applyVehicleEdit(existing, o, vl, conv => { A.switchVehicle(existing.id); A.updateVehicle(name, o, vl, conv); d.close(); }); return; }
+    A.addVehicle(name, o, vl, so); d.close();
   };
 }
 
+// Changing a vehicle's units with saved fill-ups would silently distort every figure, so ask what to do with the numbers.
+function applyVehicleEdit(v, od, vl, done) {
+  if (!v.entries.length || (od === v.odometerUnit && vl === v.volumeUnit)) { done(false); return; }
+  const n = v.entries.length, d = openDialog(`<h3>Units changed</h3><p>You have ${n} saved fill-up${n === 1 ? '' : 's'} recorded in ${esc(v.odometerUnit)} / ${esc(volL(v))}. Convert them to the new units, or only change the labels?</p><div class="acts" style="flex-wrap:wrap"><button class="tbtn" id="no">Cancel</button><button class="tbtn" id="lab">Relabel only</button><button class="tbtn" id="conv">Convert values</button></div>`);
+  d.$('#no').onclick = d.close; d.$('#lab').onclick = () => { d.close(); done(false); }; d.$('#conv').onclick = () => { d.close(); done(true); };
+}
 function customRangeDialog() {
   const d = openDialog(`<h3>Choose date range</h3><div class="stack" style="margin-bottom:16px">${dinp('from', 'From', ui.cs)}${dinp('to', 'To', ui.ce)}<div class="err" id="err"></div></div>
   <div class="acts"><button class="tbtn" id="no">Cancel</button><button class="tbtn" id="ok">Apply</button></div>`);
@@ -549,7 +592,7 @@ function cardBuilder(existing) {
   ${kind === 'chart' ? `${sel('metric', 'Metric', METRIC_OPTIONS, existing ? existing.metric : 'efficiency')}${sel('group', 'Group by', GROUP_BY_OPTIONS, existing ? existing.groupBy : 'none')}
   <div class="row g12"><div class="f1">${sel('x', 'X-axis', X_AXIS_OPTIONS, existing ? existing.xAxis : 'date')}</div><div class="f1">${sel('type', 'Chart type', CHART_TYPE_OPTIONS, existing ? existing.chartType : 'line')}</div></div>` : ''}</div>
   <div class="row g10" style="margin-top:16px">${existing ? '<button class="btn out danger f1" id="del">Delete</button>' : ''}<button class="btn f1" id="save">Save card</button></div>`);
-  if (existing) d.$('#del').onclick = () => { A.deleteCard(existing.id); d.close(); };
+  if (existing) d.$('#del').onclick = () => confirmDialog('Remove this card?', 'You can add it again later from "Add stats card".', 'Remove', () => { A.deleteCard(existing.id); d.close(); });
   d.$('#save').onclick = () => {
     const base = existing || mkCard({ kind: 'chart' }), title = d.$('#title').value;
     const c = { ...base, title: title.trim() ? title : 'Untitled card' };
@@ -624,7 +667,7 @@ function logScreen(v, D) {
     const g = e.date.slice(0, 7);
     if (g !== last) { last = g; const r = by[g]; h += `<div class="row" style="padding-top:10px;margin-top:0"><span class="ll dim" style="flex:1.15">${monthGroupLabel(e.date)}</span>${mm('Fuel', `${fmtNum(sum(r, x => x.volume), 2)} ${volL(v)}`, 1)}${mm('Spent', fmtCur(sum(r, x => x.totalCost)), 1)}${mm('Distance', `${fmtNum(sum(r, x => x.distanceSinceLast || 0), 0)} ${v.odometerUnit}`, 1)}</div>`; }
     const sv = (l, val) => `<div><div class="lsm faint">${l}</div><div style="margin-top:3px">${mono(val, 12, 500)}</div></div>`;
-    h += `<div class="card p15 click entry${e.qualifies ? '' : ' warn'}" data-entry="${e.id}"><div class="row g12">${badge('gas', e.qualifies ? TEAL : AMBER)}<div class="f1"><div class="ts">${fmtDate(e.date)}</div><div class="bs dim" style="margin-top:3px">${fmtNum(e.odometer, 0)} ${v.odometerUnit} odometer</div></div>
+    h += `<div class="card p15 click entry${e.qualifies ? '' : ' warn'}" data-entry="${esc(e.id)}"><div class="row g12">${badge('gas', e.qualifies ? TEAL : AMBER)}<div class="f1"><div class="ts">${fmtDate(e.date)}</div><div class="bs dim" style="margin-top:3px">${fmtNum(e.odometer, 0)} ${v.odometerUnit} odometer</div></div>
     ${e.qualifies ? effPill(e, v) : '<span class="npill" data-badge="1">Not counted</span>'}</div>
     <div class="row between" style="margin-top:14px">${sv('Distance', e.distanceSinceLast != null ? `${fmtNum(e.distanceSinceLast, 0)} ${v.odometerUnit}` : 'Start')}${sv('Fuel', `${fmtNum(e.volume, 2)} ${volL(v)}`)}${sv('Cost', fmtCur(e.totalCost))}</div>
     ${!e.qualifies ? `<div class="bs dim" style="margin-top:10px">${esc(notCountedReason(e))}</div>` : ''}</div>`;
@@ -668,21 +711,25 @@ function cardHtml(c, color, v, filtered, all) {
     else {
       const L = data.labels, sh = L.length <= 3 ? L : [L[0], L[L.length >> 1], L[L.length - 1]];
       chartJobs.push({ values: data.values, color, bar: c.chartType === 'bar' });
-      body = `<canvas class="chart" data-job="${chartJobs.length - 1}"></canvas><div class="row between" style="margin-top:6px">${sh.map(l => `<span class="faint" style="font-size:10px">${esc(l)}</span>`).join('')}</div>`;
+      body = `<canvas class="chart" data-job="${chartJobs.length - 1}"></canvas><div class="row${sh.length > 1 ? ' between' : ''}" style="margin-top:6px${sh.length > 1 ? '' : ';justify-content:center'}">${sh.map(l => `<span class="faint" style="font-size:10px">${esc(l)}</span>`).join('')}</div>`;
     }
   }
-  return `<div class="card"><div class="row between"><span class="ts f1 row g8"><i class="dot" style="background:${color}"></i><span class="f1">${esc(c.title)}</span></span><div class="row" style="gap:4px"><button class="ibtn" data-card-edit="${c.id}">${ic('edit', 16)}</button><button class="ibtn" data-card-del="${c.id}">${ic('del', 16)}</button></div></div><div style="height:8px"></div>${body}</div>`;
+  return `<div class="card"><div class="row between"><span class="ts f1 row g8"><i class="dot" style="background:${color}"></i><span class="f1">${esc(c.title)}</span></span><div class="row" style="gap:4px"><button class="ibtn" data-card-edit="${esc(c.id)}">${ic('edit', 16)}</button><button class="ibtn" data-card-del="${esc(c.id)}">${ic('del', 16)}</button></div></div><div style="height:8px"></div>${body}</div>`;
 }
 function drawCharts() {
   document.querySelectorAll('canvas.chart').forEach(cv => {
     const job = chartJobs[+cv.dataset.job]; if (!job) return;
-    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight; cv.width = w * dpr; cv.height = h * dpr;
+    const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight; if (!w || !h) return; /* not laid out yet; the resize handler redraws */ cv.width = w * dpr; cv.height = h * dpr;
     const g = cv.getContext('2d'); g.scale(dpr, dpr); const vals = job.values, n = vals.length, col = job.color, top0 = 16, ph = h - top0;
-    const mx = Math.max(...vals), mn = Math.min(0, ...vals), rg = (mx - mn) || 1;
+    // Bars start at 0; lines are fitted to their data (with padding) so small variations stay visible.
+    const mx0 = Math.max(...vals), mn0 = Math.min(...vals); let mx = mx0, mn = Math.min(0, mn0);
+    if (!job.bar) { const pd = (mx0 - mn0) * .15 || Math.abs(mx0) * .1 || 1; mx = mx0 + pd; mn = mn0 >= 0 ? Math.max(0, mn0 - pd) : mn0 - pd; }
+    const rg = (mx - mn) || 1, fy = x => fmtNum(x, Math.abs(x) >= 100 ? 0 : 1);
     const X = i => n === 1 ? w / 2 : w * i / (n - 1), Y = v => top0 + ph - ((v - mn) / rg) * ph;
     g.strokeStyle = '#E3E8F0'; g.lineWidth = 1; g.setLineDash([3, 4]);
     for (let i = 0; i < 4; i++) { const y = Math.round(top0 + ph * i / 3) + .5; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke(); }
-    g.setLineDash([]); g.font = '600 10px Manrope, sans-serif'; g.fillStyle = '#8F9AB0'; g.textBaseline = 'top'; g.fillText(fmtNum(mx, mx >= 100 ? 0 : 1), 0, 0);
+    g.setLineDash([]); g.font = '600 10px Manrope, sans-serif'; g.fillStyle = '#8F9AB0'; g.textBaseline = 'top'; g.fillText(fy(mx), 0, 0);
+    if (!job.bar) { g.textBaseline = 'bottom'; g.fillText(fy(mn), 0, h - 3); g.textBaseline = 'top'; }
     if (job.bar) {
       const slot = w / n, bw = Math.min(Math.max(slot * .55, 3), 36), gr = g.createLinearGradient(0, top0, 0, h); gr.addColorStop(0, col); gr.addColorStop(1, col + '66'); g.fillStyle = gr;
       vals.forEach((v, i) => { const t = Y(v), x = slot * i + slot / 2 - bw / 2, bh = Math.max(h - t, 2); g.beginPath(); g.roundRect ? g.roundRect(x, t, bw, bh, [4, 4, 0, 0]) : g.rect(x, t, bw, bh); g.fill(); });
@@ -705,7 +752,7 @@ function settingsScreen(v) {
   <div style="height:16px"></div>${secTitle('settings', 'Preferences', TEAL).replace('margin:20px 0 8px', 'margin:0 0 8px')}
   <div class="card"><div class="row g10"><div style="flex:1">${inp('s-cur', 'Currency', S.settings.currency, 'maxlength="6"')}</div><div style="flex:1.35">${sel('s-fmt', 'Date format', ['DD-MM-YYYY', 'MM-DD-YYYY', 'YYYY-MM-DD'].map(x => [x, x]), S.settings.dateFormat)}</div></div></div>
   <button class="btn tall full" data-act="save-settings" style="margin-top:16px">Save changes</button>
-  ${secTitle('down', 'Backup & restore', TEAL)}<div class="card">${act('down', 'Export CSV', 'Save your fuel history as a backup.', 'export')}${act('up', 'Import CSV', 'Merge entries into this vehicle.', 'import')}<div class="lsm faint" style="margin-top:8px">${S.lastBackup ? `Last backup: ${S.lastBackup}` : 'No export recorded yet'}</div></div>
+  ${secTitle('down', 'Backup & restore', TEAL)}<div class="card">${act('down', 'Export CSV', 'Save your fuel history as a backup.', 'export')}${act('up', 'Import CSV', 'Merge entries into this vehicle.', 'import')}<div class="lsm faint" style="margin-top:8px">${(v.lastBackup || S.lastBackup) ? `Last backup: ${esc(fmtDate(v.lastBackup || S.lastBackup))}` : 'No export recorded yet'}</div></div>
   ${secTitle('del', 'Data & storage', CORAL)}<div class="card stack">${danger('Delete this vehicle', 'Remove this vehicle and all its fill-ups.', 'del-vehicle')}${danger('Clear all data', 'Remove every vehicle and every fill-up from this device.', 'clear')}</div></div>`;
 }
 
@@ -748,7 +795,7 @@ if (typeof document !== 'undefined') document.addEventListener('click', e => {
   const tab = t.closest('[data-tab]'); if (tab) { ui.tab = tab.dataset.tab; render(); return; }
   const rg = t.closest('[data-range]'); if (rg) { ui.range = rg.dataset.range; render(); if (ui.range === 'custom') customRangeDialog(); return; }
   const ce = t.closest('[data-card-edit]'); if (ce) { const v = active(); cardBuilder(v.customCards.find(c => c.id === ce.dataset.cardEdit)); return; }
-  const cd = t.closest('[data-card-del]'); if (cd) { A.deleteCard(cd.dataset.cardDel); return; }
+  const cd = t.closest('[data-card-del]'); if (cd) { const cid = cd.dataset.cardDel; confirmDialog('Remove this card?', 'You can add it again later from "Add stats card".', 'Remove', () => A.deleteCard(cid)); return; }
   const en = t.closest('[data-entry]'); if (en) { entrySheet(active().entries.find(x => x.id === en.dataset.entry)); return; }
   const a = t.closest('[data-act]'); if (!a) return;
   switch (a.dataset.act) {
@@ -761,11 +808,17 @@ if (typeof document !== 'undefined') document.addEventListener('click', e => {
     case 'demo': A.demo(); break;
     case 'range-dialog': customRangeDialog(); break;
     case 'add-card': addCardSheet(); break;
-    case 'save-settings': { const nm = $('#s-name').value, od = $('#s-odo').value, vl = $('#s-vol').value, cu = $('#s-cur').value, fm = $('#s-fmt').value; A.updateVehicle(nm, od, vl); A.updateSettings(cu, fm); break; }
+    case 'save-settings': {
+      const v = active(), nm = $('#s-name').value, od = $('#s-odo').value, vl = $('#s-vol').value, cu = $('#s-cur').value, fm = $('#s-fmt').value;
+      if (!nm.trim()) { toast("Vehicle name can't be empty"); break; }
+      applyVehicleEdit(v, od, vl, conv => { A.updateVehicle(nm, od, vl, conv); A.updateSettings(cu, fm); }); break;
+    }
     case 'del-vehicle': { const v = active(); confirmDialog(`Delete ${v.name}?`, 'This deletes the vehicle and every fuel entry stored under it. This cannot be undone.', 'Delete', () => A.deleteVehicle(v.id)); break; }
     case 'clear': confirmDialog('Clear all data?', 'Every vehicle and every logged entry will be removed from this device. This cannot be undone.', 'Clear everything', () => A.clearAll()); break;
   }
 });
+
+if (typeof document !== 'undefined') document.addEventListener('keydown', e => { if (e.key === 'Escape' && closeTopOverlay()) e.preventDefault(); });
 
 /* ---------- boot ---------- */
 const MAX_CSV = 10 * 1024 * 1024;
@@ -785,7 +838,7 @@ function boot() {
   // Web replacement for the weekly Android backup notification: an in-app nudge on launch.
   const v = active();
   if (v && v.entries.length) {
-    const days = S.lastBackup ? Math.floor((toUTC(todayISO()) - toUTC(S.lastBackup)) / dayMs) : null;
+    const lb = v.lastBackup || S.lastBackup, days = lb ? Math.floor((toUTC(todayISO()) - toUTC(lb)) / dayMs) : null;
     if (days == null || isNaN(days) || days >= 7) setTimeout(() => toast("It's been a week since your last backup — export a CSV to keep your data safe."), 800);
   }
 }

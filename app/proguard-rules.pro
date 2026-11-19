@@ -1,6 +1,8 @@
-# Add project specific ProGuard rules here.
-# No custom rules needed currently. The app is a single WebView activity with
-# no reflection and one @JavascriptInterface bridge (AndroidBridge.saveCsv);
-# R8 keeps that bridge automatically because it is referenced from
-# MainActivity, so nothing has to be pinned by hand.
+# The web UI calls window.AndroidBridge.saveCsv(...) by name from JavaScript. R8 cannot see that
+# call, so with minifyEnabled it would rename or remove the method and CSV export would break.
+# These rules keep every @JavascriptInterface method.
+-keepattributes *Annotation*
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface <methods>;
+}
 
